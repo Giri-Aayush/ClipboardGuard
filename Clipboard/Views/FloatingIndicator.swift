@@ -17,37 +17,73 @@ enum IndicatorType {
     case paste   // When crypto address is pasted (green - verified)
 }
 
-/// Modern minimal floating indicator for copy detection
+/// Enhanced copy indicator with protection status and dismiss button
 struct CopyIndicator: View {
     let cryptoType: CryptoType
+    var protectionTime: TimeInterval? = nil  // Optional: show protection countdown
+    var onDismiss: (() -> Void)? = nil  // Optional: dismiss callback
+
     @State private var opacity: Double = 0
     @State private var scale: CGFloat = 0.8
     @State private var checkmarkScale: CGFloat = 0
 
     var body: some View {
-        HStack(spacing: 10) {
-            // Checkmark (trust building, not spying!)
-            Image(systemName: "checkmark.circle.fill")
+        HStack(spacing: 12) {
+            // Shield icon for protection
+            Image(systemName: "shield.checkered")
                 .font(.system(size: 16, weight: .semibold))
                 .foregroundColor(.white)
                 .scaleEffect(checkmarkScale)
 
-            // Crypto name - full text with space
-            Text(cryptoType.rawValue)
-                .font(.system(size: 14, weight: .semibold))
-                .foregroundColor(.white)
-                .fixedSize()  // Don't truncate text
+            VStack(alignment: .leading, spacing: 2) {
+                // Crypto name
+                Text(cryptoType.rawValue)
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundColor(.white)
+                    .fixedSize()  // Prevent truncation
+
+                // Protection status
+                if let time = protectionTime, time > 0 {
+                    Text("Protected • \(formatTime(time))")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundColor(.white.opacity(0.8))
+                        .fixedSize()  // Prevent truncation
+                } else {
+                    Text("Protected (2 min)")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundColor(.white.opacity(0.8))
+                        .fixedSize()  // Prevent truncation
+                }
+            }
+
+            // Dismiss button (×)
+            if onDismiss != nil {
+                Button(action: { onDismiss?() }) {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundColor(.white.opacity(0.6))
+                        .padding(4)
+                        .background(Circle().fill(Color.white.opacity(0.2)))
+                }
+                .buttonStyle(.plain)
+            }
         }
         .padding(.horizontal, 16)
-        .padding(.vertical, 9)
+        .padding(.vertical, 10)
         .background(
             Capsule()
-                .fill(Color.blue.opacity(0.95))
+                .fill(
+                    LinearGradient(
+                        colors: [Color.blue, Color.blue.opacity(0.85)],
+                        startPoint: .leading,
+                        endPoint: .trailing
+                    )
+                )
                 .overlay(
                     Capsule()
                         .strokeBorder(Color.white.opacity(0.3), lineWidth: 1)
                 )
-                .shadow(color: .black.opacity(0.25), radius: 10, x: 0, y: 3)
+                .shadow(color: .blue.opacity(0.3), radius: 12, x: 0, y: 4)
         )
         .scaleEffect(scale)
         .opacity(opacity)
@@ -58,19 +94,27 @@ struct CopyIndicator: View {
                 scale = 1.0
             }
 
-            // Checkmark pop
+            // Icon pop
             withAnimation(.spring(response: 0.3, dampingFraction: 0.6).delay(0.05)) {
                 checkmarkScale = 1.0
             }
 
-            // Fade out
-            DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
-                withAnimation(.easeOut(duration: 0.3)) {
-                    opacity = 0
-                    scale = 0.9
+            // Auto-hide after 3 seconds if no protection time shown
+            if protectionTime == nil {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
+                    withAnimation(.easeOut(duration: 0.3)) {
+                        opacity = 0
+                        scale = 0.9
+                    }
                 }
             }
         }
+    }
+
+    private func formatTime(_ seconds: TimeInterval) -> String {
+        let mins = Int(seconds) / 60
+        let secs = Int(seconds) % 60
+        return String(format: "%d:%02d", mins, secs)
     }
 }
 

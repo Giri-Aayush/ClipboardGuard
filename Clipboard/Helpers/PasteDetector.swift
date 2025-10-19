@@ -11,23 +11,28 @@ import AppKit
 import Combine
 #endif
 
-/// Detects when user pastes content (Cmd+V or Edit > Paste)
+/// Detects when user copies (Cmd+C) or pastes (Cmd+V) content
 #if os(macOS)
 class PasteDetector: ObservableObject {
 
     // MARK: - Published Properties
 
     @Published var didPaste: Bool = false
+    @Published var didCopy: Bool = false
 
     // MARK: - Private Properties
 
     private var eventMonitor: Any?
     private var lastPasteTime: Date = .distantPast
+    private var lastCopyTime: Date = .distantPast
 
     // MARK: - Callbacks
 
     /// Called when paste is detected
     var onPasteDetected: (() -> Void)?
+
+    /// Called when copy is detected (Cmd+C)
+    var onCopyDetected: (() -> Void)?
 
     // MARK: - Initialization
 
@@ -93,9 +98,16 @@ class PasteDetector: ObservableObject {
     // MARK: - Event Handling
 
     private func handleKeyEvent(_ event: NSEvent) {
+        let cmd = event.modifierFlags.contains(.command)
+        let key = event.charactersIgnoringModifiers?.lowercased()
+
         // Check for Cmd+V (paste)
-        if event.modifierFlags.contains(.command) && event.charactersIgnoringModifiers == "v" {
+        if cmd && key == "v" {
             handlePaste()
+        }
+        // Check for Cmd+C (copy)
+        else if cmd && key == "c" {
+            handleCopy()
         }
     }
 
@@ -120,6 +132,36 @@ class PasteDetector: ObservableObject {
                 self?.didPaste = false
             }
         }
+    }
+
+    private func handleCopy() {
+        // Debounce - ignore rapid copies within 300ms
+        let now = Date()
+        guard now.timeIntervalSince(lastCopyTime) > 0.3 else {
+            return
+        }
+
+        lastCopyTime = now
+
+        print("📋 [PasteDetector] ⌘C detected - USER COPIED!")
+
+        // Notify
+        DispatchQueue.main.async { [weak self] in
+            self?.didCopy = true
+            self?.onCopyDetected?()
+
+            // Reset after a moment
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                self?.didCopy = false
+            }
+        }
+    }
+
+    // MARK: - Public API
+
+    /// Returns the timestamp of the last user copy event
+    var lastUserCopyTimestamp: Date {
+        return lastCopyTime
     }
 }
 #endif

@@ -27,6 +27,8 @@ class ClipboardMonitor: ObservableObject {
     @Published var threatsBlocked: Int = 0
     @Published var pasteCount: Int = 0
     @Published var copyCount: Int = 0
+    @Published var protectionActive: Bool = false
+    @Published var protectionTimeRemaining: TimeInterval = 0
 
     // MARK: - Private Properties
 
@@ -36,6 +38,17 @@ class ClipboardMonitor: ObservableObject {
     private var lastChangeCount: Int = 0
     internal var monitoredContent: String?  // Accessible for instant paste verification
     private var monitoredContentHash: String?
+
+    // MARK: - Protection Timer
+
+    private var protectionStartTime: Date?
+    private var protectionExpiryTimer: Timer?
+    private let protectionDuration: TimeInterval = 120 // 2 minutes (like Opera)
+
+    // MARK: - User Copy Detection
+
+    var lastUserCopyTime: Date?  // Set by PasteDetector callback
+    private let userCopyWindow: TimeInterval = 0.5  // 500ms window
 
     /// Ultra-fast polling interval (5ms = 200 checks per second)
     private let pollingInterval: DispatchTimeInterval = .milliseconds(5)
@@ -50,6 +63,9 @@ class ClipboardMonitor: ObservableObject {
 
     /// Called when clipboard hijacking is detected
     var onHijackDetected: ((String, String) -> Void)?
+
+    /// Called when clipboard changes to non-crypto content during protection
+    var onNonCryptoContentCopied: (() -> Void)?
 
     // MARK: - Paste Detection
 
@@ -142,6 +158,83 @@ class ClipboardMonitor: ObservableObject {
         print("📋 ClipboardMonitor: Stopped monitoring")
     }
 
+    // MARK: - Protection Management
+
+    /// Starts protecting a specific address for 2 minutes
+    func startProtection(for address: String, type: CryptoType) {
+        // Cancel any existing protection timer
+        DispatchQueue.main.async { [weak self] in
+            self?.protectionExpiryTimer?.invalidate()
+        }
+
+        // Store what we're protecting
+        monitoredContent = address
+        monitoredContentHash = hashContent(address)
+        protectionStartTime = Date()
+
+        // Update UI state AND create timer on main thread
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+
+            self.protectionActive = true
+            self.protectionTimeRemaining = self.protectionDuration
+
+            // CRITICAL: Timer MUST be created on main thread!
+            self.protectionExpiryTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
+                self?.updateProtectionTimer()
+            }
+
+            print("🛡️ [Protection] Timer created on main thread")
+            print("   Timer valid: \(self.protectionExpiryTimer?.isValid ?? false)")
+        }
+
+        print("🛡️ [Protection] Started protecting \(type.rawValue) for 2 minutes")
+    }
+
+    /// Stops protection (user clicked × or paste completed)
+    func stopProtection() {
+        protectionExpiryTimer?.invalidate()
+        protectionExpiryTimer = nil
+        protectionStartTime = nil
+        monitoredContent = nil
+        monitoredContentHash = nil
+
+        DispatchQueue.main.async { [weak self] in
+            self?.protectionActive = false
+            self?.protectionTimeRemaining = 0
+        }
+
+        print("🛡️ [Protection] Stopped")
+    }
+
+    /// Updates protection timer countdown
+    private func updateProtectionTimer() {
+        guard let startTime = protectionStartTime else {
+            print("⚠️  [ClipboardMonitor] updateProtectionTimer: startTime is nil")
+            stopProtection()
+            return
+        }
+
+        let elapsed = Date().timeIntervalSince(startTime)
+        let remaining = max(0, protectionDuration - elapsed)
+
+        // Log every second
+        let currentSecond = Int(remaining)
+        if currentSecond != Int(protectionTimeRemaining) {
+            print("⏱️  [ClipboardMonitor] protectionTimeRemaining: \(currentSecond)s (elapsed: \(Int(elapsed))s)")
+        }
+
+        DispatchQueue.main.async { [weak self] in
+            self?.protectionTimeRemaining = remaining
+        }
+
+        // Auto-expire after 2 minutes
+        if remaining <= 0 {
+            print("🛡️ [Protection] Auto-expired after 2 minutes")
+            stopProtection()
+        }
+    }
+
     // MARK: - Private Methods
 
     /// ULTRA-FAST monitoring check - called every 5ms (200 times per second)
@@ -223,14 +316,19 @@ class ClipboardMonitor: ObservableObject {
 
         // Check if this was a paste event or copy event
         if isPasteEvent {
-            print("   ✅ PASTE EVENT - Showing verification indicator")
-            onCryptoPasted?(content, type)
-            isPasteEvent = false  // Reset
+            // Only show verification if pasting the PROTECTED address
+            if protectionActive && monitoredContent == content {
+                print("   ✅ PASTE EVENT - Protected address verified!")
+                onCryptoPasted?(content, type)
 
-            // Update paste count ON MAIN THREAD
-            DispatchQueue.main.async { [weak self] in
-                self?.pasteCount += 1
+                // Update paste count ON MAIN THREAD
+                DispatchQueue.main.async { [weak self] in
+                    self?.pasteCount += 1
+                }
+            } else {
+                print("   ℹ️  PASTE EVENT - Different content (not the protected address)")
             }
+            isPasteEvent = false  // Reset
         } else {
             print("   👁️  COPY EVENT - Showing monitoring indicator")
             onCryptoCopied?(content, type)
@@ -243,6 +341,7 @@ class ClipboardMonitor: ObservableObject {
     }
 
     /// Checks if the monitored clipboard content has been hijacked
+    /// Uses TIME-CORRELATION to distinguish user copies from malware
     private func checkForHijacking() {
         guard let originalContent = monitoredContent,
               let originalHash = monitoredContentHash else {
@@ -260,21 +359,46 @@ class ClipboardMonitor: ObservableObject {
         let currentHash = hashContent(currentContent)
 
         if currentHash != originalHash {
-            // HIJACK DETECTED!
-            // Only log it, DON'T auto-restore (let user copy other things freely)
-            // Restoration will happen via paste blocker instead
-            print("⚠️ HIJACK DETECTED!")
-            print("   Original:  \(maskAddress(originalContent))")
-            print("   Attempted: \(maskAddress(currentContent))")
-            print("   Will block on paste attempt, not restoring clipboard now")
+            // Clipboard changed! But was it the USER or MALWARE?
 
-            // Update statistics ON MAIN THREAD
-            DispatchQueue.main.async { [weak self] in
-                self?.threatsBlocked += 1
+            // TIME-CORRELATION CHECK:
+            // If clipboard change happened within 500ms of Cmd+C, it was the user
+            if let lastCopy = lastUserCopyTime,
+               Date().timeIntervalSince(lastCopy) < userCopyWindow {
+                // USER INTENTIONALLY COPIED NEW CONTENT
+                print("🔄 [Smart Protection] User copied new content - switching protection")
+                print("   Old: \(maskAddress(originalContent))")
+                print("   New: \(maskAddress(currentContent))")
+
+                // Check if it's another crypto address
+                if let newType = patternMatcher.detectCryptoType(currentContent) {
+                    // Switch protection to new address
+                    print("   ✅ New address is \(newType.rawValue) - protecting it now")
+                    startProtection(for: currentContent, type: newType)
+                } else {
+                    // Not a crypto address, stop protection and show warning
+                    print("   ⚠️  Not a crypto address - stopping protection and showing warning")
+                    stopProtection()
+
+                    // Notify that non-crypto content was copied
+                    onNonCryptoContentCopied?()
+                }
+            } else {
+                // NO RECENT CMD+C EVENT - MALWARE HIJACKING!
+                print("🚨 HIJACK DETECTED!")
+                print("   Original:  \(maskAddress(originalContent))")
+                print("   Hijacked:  \(maskAddress(currentContent))")
+                print("   No Cmd+C detected - MALWARE changed clipboard!")
+                print("   Will block on paste attempt")
+
+                // Update statistics ON MAIN THREAD
+                DispatchQueue.main.async { [weak self] in
+                    self?.threatsBlocked += 1
+                }
+
+                // Notify callback (for UI notification)
+                onHijackDetected?(originalContent, currentContent)
             }
-
-            // Notify callback (for UI notification, but don't restore)
-            onHijackDetected?(originalContent, currentContent)
         }
     }
 
