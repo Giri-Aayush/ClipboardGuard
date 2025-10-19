@@ -48,8 +48,8 @@ class ProtectionTimerViewModel: ObservableObject {
                 self.showWarning = true
             }
 
-            // Auto-dismiss after 8 seconds (longer duration for visibility)
-            DispatchQueue.main.asyncAfter(deadline: .now() + 8.0) { [weak self] in
+            // Auto-dismiss after 5 seconds
+            DispatchQueue.main.asyncAfter(deadline: .now() + 5.0) { [weak self] in
                 self?.hideWarning()
             }
         }
@@ -71,21 +71,22 @@ class ProtectionTimerWindow: NSWindow {
     private var viewModel: ProtectionTimerViewModel?
 
     // Notchnook-style dimensions
-    private let collapsedHeight: CGFloat = 32  // Matches notch height
-    private let expandedHeight: CGFloat = 110  // Expanded state
-    private let widgetWidth: CGFloat = 340
+    private let notchHeight: CGFloat = 32  // Actual MacBook notch height
+    private let expandedHeight: CGFloat = 100  // Content height when expanded
+    private let widgetWidth: CGFloat = 360
 
     init() {
         // Get screen bounds
         let screen = NSScreen.main ?? NSScreen.screens[0]
         let screenFrame = screen.frame
 
-        // Start collapsed into notch (FLUSH with top of screen)
+        // CRITICAL: Window must extend INTO notch area
+        // Start with window ABOVE visible screen, extending into notch
         let windowRect = NSRect(
             x: (screenFrame.width - widgetWidth) / 2,  // Center horizontally
-            y: screenFrame.maxY - collapsedHeight,      // FLUSH with screen top
+            y: screenFrame.maxY - notchHeight,         // Top edge extends into notch
             width: widgetWidth,
-            height: collapsedHeight
+            height: notchHeight  // Start collapsed (only notch visible)
         )
 
         super.init(
@@ -95,19 +96,19 @@ class ProtectionTimerWindow: NSWindow {
             defer: false
         )
 
-        self.level = .statusBar  // Above everything
+        self.level = .statusBar + 1  // Above menu bar to access notch area
         self.isOpaque = false
         self.backgroundColor = .clear
-        self.hasShadow = true
+        self.hasShadow = false  // No shadow initially
         self.ignoresMouseEvents = false
         self.isReleasedWhenClosed = false
-        self.collectionBehavior = [.canJoinAllSpaces, .stationary, .fullScreenAuxiliary]
+        self.collectionBehavior = [.canJoinAllSpaces, .stationary, .fullScreenAuxiliary, .ignoresCycle]
 
-        // Initially hidden (collapsed into notch)
+        // Start invisible
         self.alphaValue = 0
     }
 
-    /// Shows protection timer with Notchnook-style animation
+    /// Shows protection timer with Notchnook-style animation - expands down from notch
     func showProtection(for type: CryptoType, timeRemaining: TimeInterval, onDismiss: @escaping () -> Void) {
         print("🪟 [ProtectionTimerWindow] showProtection() called")
         print("   Type: \(type.rawValue)")
@@ -124,46 +125,48 @@ class ProtectionTimerWindow: NSWindow {
         hostingView = NSHostingView(rootView: timerView)
         self.contentView = hostingView
 
+        guard let screen = NSScreen.main else { return }
+        let screenFrame = screen.frame
+
+        // Position window to extend into notch
+        let centerX = (screenFrame.width - widgetWidth) / 2
+
+        // Start: Window top edge in notch area, only notch height visible
+        let startY = screenFrame.maxY - notchHeight
+        self.setFrame(NSRect(x: centerX, y: startY, width: widgetWidth, height: notchHeight), display: true)
+
         print("🪟 [ProtectionTimerWindow] Ordering window front...")
         self.orderFront(nil)
+        self.alphaValue = 1.0  // Fade in immediately
 
-        // Notchnook-style: Spring bounce animation expanding down from notch
-        print("🪟 [ProtectionTimerWindow] Starting animation...")
-        NSAnimationContext.runAnimationGroup { context in
-            context.duration = 0.5
-            context.timingFunction = CAMediaTimingFunction(controlPoints: 0.34, 1.56, 0.64, 1)  // Spring bounce
-            context.allowsImplicitAnimation = true
+        // CRITICAL: Animate expansion downward (like notch extending)
+        // Keep top edge fixed, increase height downward
+        print("🪟 [ProtectionTimerWindow] Animating notch expansion...")
 
-            if let screen = NSScreen.main {
-                // Use FULL screen frame (not visibleFrame) to access notch area
-                let screenFrame = screen.frame
-                print("🪟 [ProtectionTimerWindow] Full screen frame: \(screenFrame)")
-                print("   Visible frame: \(screen.visibleFrame)")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = 0.6
+                // Notchnook bounce: spring with overshoot
+                context.timingFunction = CAMediaTimingFunction(controlPoints: 0.16, 1.15, 0.5, 1.0)
+                context.allowsImplicitAnimation = true
 
-                // Calculate position: window should be AT THE VERY TOP
-                // macOS coordinates: (0,0) is bottom-left, Y increases upward
-                // Window frame origin is the BOTTOM-LEFT corner of the window
-                // So to position top edge at screen top: Y = screenHeight - windowHeight
+                // Expand DOWN from notch - keep top fixed, grow height
+                let finalY = screenFrame.maxY - (self.notchHeight + self.expandedHeight)
+                let finalFrame = NSRect(
+                    x: centerX,
+                    y: finalY,
+                    width: self.widgetWidth,
+                    height: self.notchHeight + self.expandedHeight
+                )
 
-                let targetY = screenFrame.maxY - expandedHeight
-                let targetX = (screenFrame.width - widgetWidth) / 2
+                print("🪟 [ProtectionTimerWindow] Expanding to: \(finalFrame)")
+                self.animator().setFrame(finalFrame, display: true)
 
-                var newFrame = self.frame
-                newFrame.origin.x = targetX
-                newFrame.origin.y = targetY
-                newFrame.size.width = widgetWidth
-                newFrame.size.height = expandedHeight
-
-                print("🪟 [ProtectionTimerWindow] Target position:")
-                print("   X: \(targetX) (centered)")
-                print("   Y: \(targetY) (top edge at \(targetY + expandedHeight))")
-                print("   Screen height: \(screenFrame.maxY)")
-
-                self.setFrame(newFrame, display: true, animate: true)
-                self.animator().alphaValue = 1.0
+                // Add shadow when expanded
+                self.hasShadow = true
+            } completionHandler: {
+                print("🪟 [ProtectionTimerWindow] Expansion complete!")
             }
-        } completionHandler: {
-            print("🪟 [ProtectionTimerWindow] Animation complete! Alpha: \(self.alphaValue)")
         }
     }
 
@@ -189,23 +192,29 @@ class ProtectionTimerWindow: NSWindow {
         }
     }
 
-    /// Hides the protection timer with spring animation back into notch
+    /// Hides the protection timer - collapses back into notch seamlessly
     func hideProtection() {
-        // Spring bounce animation collapsing back into notch
+        guard let screen = NSScreen.main else { return }
+        let screenFrame = screen.frame
+
         NSAnimationContext.runAnimationGroup { context in
-            context.duration = 0.4
-            context.timingFunction = CAMediaTimingFunction(controlPoints: 0.5, 0, 0.5, 1)  // Ease in-out
+            context.duration = 0.5
+            context.timingFunction = CAMediaTimingFunction(controlPoints: 0.5, 0, 0.5, 1)
             context.allowsImplicitAnimation = true
 
-            if let screen = NSScreen.main {
-                let screenFrame = screen.frame
-                var newFrame = self.frame
-                // Collapse back into notch
-                newFrame.origin.y = screenFrame.maxY - collapsedHeight
-                newFrame.size.height = collapsedHeight
-                self.setFrame(newFrame, display: true, animate: true)
-                self.animator().alphaValue = 0
-            }
+            // Collapse back into notch - shrink height upward
+            let centerX = (screenFrame.width - widgetWidth) / 2
+            let collapsedY = screenFrame.maxY - notchHeight
+            let collapsedFrame = NSRect(
+                x: centerX,
+                y: collapsedY,
+                width: widgetWidth,
+                height: notchHeight
+            )
+
+            self.animator().setFrame(collapsedFrame, display: true)
+            self.animator().alphaValue = 0
+            self.hasShadow = false
         } completionHandler: {
             self.orderOut(nil)
             self.viewModel = nil
@@ -221,114 +230,93 @@ struct ProtectionTimerView: View {
     @State private var pulseScale: CGFloat = 1.0
 
     var body: some View {
+        // Full widget with rounded corners matching notch curvature
         VStack(spacing: 0) {
-            // Main timer content - Notchnook style
-            VStack(spacing: 10) {
-                // Warning banner (appears above main content)
-                if viewModel.showWarning {
-                    HStack(spacing: 8) {
-                        Image(systemName: "exclamationmark.triangle.fill")
-                            .font(.system(size: 14, weight: .semibold))
-                            .foregroundColor(.yellow)
+            // Warning banner (if active)
+            if viewModel.showWarning {
+                HStack(spacing: 8) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundColor(.yellow)
 
-                        Text(viewModel.warningMessage ?? "")
-                            .font(.system(size: 11, weight: .medium))
-                            .foregroundColor(.white)
-                            .lineLimit(2)
-                            .multilineTextAlignment(.leading)
-                    }
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 8)
-                    .background(
-                        RoundedRectangle(cornerRadius: 10)
-                            .fill(Color.orange.opacity(0.9))
-                    )
-                    .transition(.move(edge: .top).combined(with: .opacity))
+                    Text(viewModel.warningMessage ?? "")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundColor(.white)
+                        .lineLimit(2)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
-
-                // Main protection status
-                HStack(spacing: 12) {
-                    // Crypto icon with subtle glow
-                    ZStack {
-                        Circle()
-                            .fill(Color.white.opacity(0.1))
-                            .frame(width: 44, height: 44)
-
-                        Text(cryptoEmoji(for: viewModel.cryptoType))
-                            .font(.system(size: 22))
-                    }
-
-                    VStack(alignment: .leading, spacing: 3) {
-                        // Crypto type
-                        Text(viewModel.cryptoType.rawValue)
-                            .font(.system(size: 13, weight: .semibold))
-                            .foregroundColor(.white.opacity(0.8))
-                            .fixedSize()
-
-                        // Live countdown timer
-                        HStack(spacing: 6) {
-                            Image(systemName: "shield.lefthalf.filled")
-                                .font(.system(size: 14, weight: .semibold))
-                                .foregroundColor(.green)
-                                .scaleEffect(pulseScale)
-
-                            Text(formatTime(viewModel.timeRemaining))
-                                .font(.system(size: 20, weight: .bold, design: .rounded))
-                                .foregroundColor(.white)
-                                .monospacedDigit()
-                                .fixedSize()
-                                .id(viewModel.timeRemaining)  // Force SwiftUI to update
-                        }
-                    }
-
-                    Spacer()
-
-                    // Dismiss button
-                    Button(action: {
-                        viewModel.onDismiss?()
-                    }) {
-                        Image(systemName: "xmark.circle.fill")
-                            .font(.system(size: 18))
-                            .foregroundColor(.white.opacity(0.5))
-                    }
-                    .buttonStyle(.plain)
-                    .help("Stop protection")
-                }
-                .padding(.horizontal, 16)
+                .padding(.horizontal, 20)
                 .padding(.vertical, 10)
+                .padding(.top, 32)  // Account for notch height
+                .frame(maxWidth: .infinity)
+                .background(Color.orange.opacity(0.15))
+                .transition(.move(edge: .top).combined(with: .opacity))
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .background(
-                // Notchnook-style: Black background with rounded bottom corners only
-                UnevenRoundedRectangle(
-                    topLeadingRadius: 0,
-                    bottomLeadingRadius: 18,
-                    bottomTrailingRadius: 18,
-                    topTrailingRadius: 0
-                )
-                .fill(Color.black.opacity(0.95))
-                .overlay(
-                    UnevenRoundedRectangle(
-                        topLeadingRadius: 0,
-                        bottomLeadingRadius: 18,
-                        bottomTrailingRadius: 18,
-                        topTrailingRadius: 0
-                    )
-                    .strokeBorder(
-                        LinearGradient(
-                            colors: [
-                                Color.white.opacity(0.15),
-                                Color.white.opacity(0.05)
-                            ],
-                            startPoint: .top,
-                            endPoint: .bottom
-                        ),
-                        lineWidth: 1
-                    )
-                )
-                .shadow(color: .black.opacity(0.4), radius: 25, x: 0, y: 15)
-            )
+
+            // Main protection status
+            HStack(spacing: 14) {
+                // Crypto icon
+                ZStack {
+                    Circle()
+                        .fill(
+                            LinearGradient(
+                                colors: [Color.white.opacity(0.15), Color.white.opacity(0.05)],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            )
+                        )
+                        .frame(width: 50, height: 50)
+
+                    Text(cryptoEmoji(for: viewModel.cryptoType))
+                        .font(.system(size: 24))
+                }
+
+                VStack(alignment: .leading, spacing: 4) {
+                    // Crypto type
+                    Text(viewModel.cryptoType.rawValue)
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundColor(.white.opacity(0.7))
+                        .fixedSize()
+
+                    // Live countdown timer with shield
+                    HStack(spacing: 7) {
+                        Image(systemName: "shield.lefthalf.filled")
+                            .font(.system(size: 15, weight: .semibold))
+                            .foregroundColor(.green)
+                            .scaleEffect(pulseScale)
+
+                        Text(formatTime(viewModel.timeRemaining))
+                            .font(.system(size: 22, weight: .bold, design: .rounded))
+                            .foregroundColor(.white)
+                            .monospacedDigit()
+                            .fixedSize()
+                            .id(viewModel.timeRemaining)
+                    }
+                }
+
+                Spacer()
+
+                // Dismiss button
+                Button(action: {
+                    viewModel.onDismiss?()
+                }) {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 20))
+                        .foregroundColor(.white.opacity(0.4))
+                }
+                .buttonStyle(.plain)
+                .help("Dismiss")
+            }
+            .padding(.horizontal, 20)
+            .padding(.vertical, 16)
+            .padding(.top, viewModel.showWarning ? 0 : 32)  // Notch spacer when no warning
         }
+        .background(
+            // CRITICAL: Rounded corners ALL AROUND to match notch curve
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .fill(Color.black)  // Pure black to blend with notch
+                .shadow(color: .black.opacity(0.3), radius: 20, x: 0, y: 10)
+        )
         .onAppear {
             // Pulse animation for shield icon
             withAnimation(.easeInOut(duration: 1.5).repeatForever(autoreverses: true)) {

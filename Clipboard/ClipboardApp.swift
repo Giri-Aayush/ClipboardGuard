@@ -173,10 +173,21 @@ struct ClipboardApp: App {
         }
 
         clipboardMonitor.onNonCryptoContentCopied = { [self] in
-            print("⚠️  Non-crypto content copied - showing warning")
+            print("⚠️  Non-crypto content copied - showing warning and auto-hiding in 5s")
             #if os(macOS)
             DispatchQueue.main.async {
-                self.protectionTimer.showWarning("Non-crypto content copied - Protection ended. Copy address again to re-enable protection.")
+                // Stop the protection timer update loop
+                self.timerWrapper.timer?.invalidate()
+                self.timerWrapper.timer = nil
+
+                // Show warning for 5 seconds
+                self.protectionTimer.showWarning("Non-crypto content copied - Protection stopped")
+
+                // Auto-hide widget after 5 seconds
+                DispatchQueue.main.asyncAfter(deadline: .now() + 5.0) {
+                    print("⏱️  Auto-hiding protection timer after 5s")
+                    self.hideProtectionTimer()
+                }
             }
             #endif
         }
