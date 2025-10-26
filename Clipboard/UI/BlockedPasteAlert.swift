@@ -12,6 +12,10 @@ import AppKit
 /// Floating red alert window that appears at cursor when paste is blocked
 class BlockedPasteAlertWindow: NSWindow {
 
+    // Override to prevent window from becoming key (prevents focus and desktop switching)
+    override var canBecomeKey: Bool { false }
+    override var canBecomeMain: Bool { false }
+
     // MARK: - Initialization
 
     init() {
@@ -28,12 +32,21 @@ class BlockedPasteAlertWindow: NSWindow {
         self.hasShadow = true
         self.ignoresMouseEvents = false  // Allow user to dismiss by clicking
         self.isReleasedWhenClosed = false
+        self.collectionBehavior = [.canJoinAllSpaces, .stationary]
+
+        // Prevent this window from activating the app
+        self.hidesOnDeactivate = false
+        self.styleMask.insert(.nonactivatingPanel)
 
         // Initially hidden
         self.alphaValue = 0
     }
 
     // MARK: - Show Alert
+
+    func showHijackDuringConfirmation(original: String, hijacked: String) {
+        showBlocked(original: original, hijacked: hijacked)
+    }
 
     func showBlocked(original: String, hijacked: String) {
         // Get cursor position
@@ -56,10 +69,16 @@ class BlockedPasteAlertWindow: NSWindow {
             }
         )
 
-        self.contentView = NSHostingView(rootView: alertView)
+        let hosting = NSHostingView(rootView: alertView)
+        hosting.wantsLayer = true
+        hosting.layer?.backgroundColor = .clear
+        hosting.layer?.isOpaque = false
+        self.contentView = hosting
+        self.contentView?.wantsLayer = true
+        self.contentView?.layer?.backgroundColor = .clear
 
-        // Show with animation
-        self.orderFront(nil)
+        // Show with animation - use orderFrontRegardless() to avoid activating the app
+        self.orderFrontRegardless()
 
         NSAnimationContext.runAnimationGroup { context in
             context.duration = 0.15

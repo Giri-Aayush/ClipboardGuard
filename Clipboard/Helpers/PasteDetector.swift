@@ -34,6 +34,12 @@ class PasteDetector: ObservableObject {
     /// Called when copy is detected (Cmd+C)
     var onCopyDetected: (() -> Void)?
 
+    /// Called when intentional protection copy is detected (Option+Cmd+C)
+    var onIntentionalCopyDetected: (() -> Void)?
+
+    /// Called when Escape key is pressed (to dismiss protection)
+    var onEscapePressed: (() -> Void)?
+
     // MARK: - Initialization
 
     init() {
@@ -99,13 +105,22 @@ class PasteDetector: ObservableObject {
 
     private func handleKeyEvent(_ event: NSEvent) {
         let cmd = event.modifierFlags.contains(.command)
+        let option = event.modifierFlags.contains(.option)
         let key = event.charactersIgnoringModifiers?.lowercased()
 
+        // Check for Escape key (dismiss protection)
+        if event.keyCode == 53 {  // Escape key code
+            handleEscape()
+        }
         // Check for Cmd+V (paste)
-        if cmd && key == "v" {
+        else if cmd && key == "v" {
             handlePaste()
         }
-        // Check for Cmd+C (copy)
+        // Check for Option+Cmd+C (intentional protection copy)
+        else if cmd && option && key == "c" {
+            handleIntentionalCopy()
+        }
+        // Check for Cmd+C (regular copy)
         else if cmd && key == "c" {
             handleCopy()
         }
@@ -154,6 +169,38 @@ class PasteDetector: ObservableObject {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
                 self?.didCopy = false
             }
+        }
+    }
+
+    private func handleIntentionalCopy() {
+        // Debounce - ignore rapid copies within 300ms
+        let now = Date()
+        guard now.timeIntervalSince(lastCopyTime) > 0.3 else {
+            return
+        }
+
+        lastCopyTime = now
+
+        print("🔐 [PasteDetector] ⌥⌘C detected - INTENTIONAL PROTECTION COPY!")
+
+        // Notify
+        DispatchQueue.main.async { [weak self] in
+            self?.didCopy = true
+            self?.onIntentionalCopyDetected?()
+
+            // Reset after a moment
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                self?.didCopy = false
+            }
+        }
+    }
+
+    private func handleEscape() {
+        print("⌨️  [PasteDetector] ESC pressed - Dismiss protection!")
+
+        // Notify
+        DispatchQueue.main.async { [weak self] in
+            self?.onEscapePressed?()
         }
     }
 

@@ -8,8 +8,58 @@
 import SwiftUI
 import UserNotifications
 
+#if os(macOS)
+import AppKit
+
+// CRITICAL: AppDelegate to prevent automatic window opening and desktop switching
+class AppDelegate: NSObject, NSApplicationDelegate {
+    var statusItem: NSStatusItem?
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        // CRITICAL: Set activation policy to accessory to prevent dock icon and app switching
+        NSApp.setActivationPolicy(.accessory)
+
+        // Add menu bar icon so users can still access the app
+        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+        if let button = statusItem?.button {
+            // Modern minimal icon: doc.on.clipboard.fill (clipboard with protection indicator)
+            button.image = NSImage(systemSymbolName: "doc.on.clipboard.fill", accessibilityDescription: "ClipboardGuard")
+            button.action = #selector(showMainWindow)
+            button.target = self
+        }
+    }
+
+    @objc func showMainWindow() {
+        // Temporarily switch to regular app to show window
+        NSApp.setActivationPolicy(.regular)
+        NSApp.activate(ignoringOtherApps: true)
+
+        // Find and show the main window
+        for window in NSApp.windows {
+            if window.title.isEmpty || window.contentView is NSHostingView<ContentView> {
+                window.makeKeyAndOrderFront(nil)
+                break
+            }
+        }
+
+        // Switch back to accessory after a delay
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+            NSApp.setActivationPolicy(.accessory)
+        }
+    }
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        return false
+    }
+}
+#endif
+
 @main
 struct ClipboardApp: App {
+
+    #if os(macOS)
+    @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
+    #endif
 
     // MARK: - State Objects
 
@@ -19,7 +69,7 @@ struct ClipboardApp: App {
     #if os(macOS)
     private let floatingIndicator = FloatingIndicatorWindow()
     private let blockedPasteAlert = BlockedPasteAlertWindow()
-    private let protectionTimer = ProtectionTimerWindow()
+    private let notchManager = DynamicNotchManager()
     @StateObject private var pasteDetector = PasteDetector()
     private let pasteBlocker = PasteBlocker()
     #endif
@@ -54,6 +104,9 @@ struct ClipboardApp: App {
         #if os(macOS)
         .windowStyle(.hiddenTitleBar)
         .windowResizability(.contentSize)
+        // CRITICAL: Don't auto-show window when app activates
+        .defaultSize(width: 800, height: 600)
+        .commandsRemoved()
         #endif
     }
 
@@ -67,12 +120,90 @@ struct ClipboardApp: App {
             await notificationManager.requestAuthorization()
         }
 
-        // Setup COPY detector (Cmd+C)
+        // Setup COPY detector (Cmd+C) - Regular copy
         #if os(macOS)
         pasteDetector.onCopyDetected = { [self] in
             // Record timestamp for time-correlation
             clipboardMonitor.lastUserCopyTime = pasteDetector.lastUserCopyTimestamp
-            print("⏱️  [Time-Correlation] Cmd+C detected at \(Date())")
+            print("⏱️  [Copy] Cmd+C detected at \(Date())")
+        }
+
+        // Setup INTENTIONAL COPY detector (Option+Cmd+C) - Instant protection
+        pasteDetector.onIntentionalCopyDetected = { [self] in
+            print("🔐 [IntentionalCopy] Option+Cmd+C detected - INSTANT PROTECTION")
+
+            // CHECK: If protection is already active, show warning instead
+            if self.clipboardMonitor.protectionActive {
+                print("⚠️  [IntentionalCopy] Protection already active - showing locked warning")
+
+                // Play beep for audio feedback
+                #if os(macOS)
+                NSSound.beep()
+                #endif
+
+                // Show warning in notch
+                Task { @MainActor in
+                    await self.notchManager.showWarning("🔒 Clipboard is locked - protection active!")
+                }
+                return
+            }
+
+            // CRITICAL: Wait for clipboard to update (copy event happens AFTER keypress)
+            // Option+Cmd+C means user is ABOUT to copy - clipboard updates ~50ms later
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                // Read clipboard to check if it's a crypto address
+                #if os(macOS)
+                guard let clipboardContent = NSPasteboard.general.string(forType: .string) else {
+                    print("⚠️  No string in clipboard")
+                    return
+                }
+                #endif
+
+                // Detect crypto type using pattern matcher
+                let patternMatcher = PatternMatcher()
+                guard let detectedType = patternMatcher.detectCryptoType(clipboardContent) else {
+                    print("ℹ️  Not a crypto address - ignoring Option+Cmd+C")
+                    return
+                }
+
+                print("✅ Crypto address detected: \(detectedType.rawValue)")
+
+                // Show toast notification first
+                Task { @MainActor in
+                    await self.notchManager.showProtectionEnabledToast(for: detectedType)
+
+                    // Wait for toast to auto-hide (2 seconds) plus animation time
+                    try? await Task.sleep(for: .seconds(2.8))
+
+                    // Ensure toast is fully hidden before showing timer
+                    await self.notchManager.hideToast()
+
+                    // Now enable protection (this will trigger onProtectionConfirmed callback which shows timer)
+                    self.clipboardMonitor.enableInstantProtection(address: clipboardContent, type: detectedType)
+                }
+            }
+        }
+
+        // Setup ESCAPE key detector - dismiss protection
+        pasteDetector.onEscapePressed = { [self] in
+            guard clipboardMonitor.protectionActive else {
+                print("ℹ️  Escape pressed but no active protection")
+                return
+            }
+
+            print("🔓 [Escape] User manually dismissed protection")
+
+            // Stop protection
+            clipboardMonitor.stopProtection()
+
+            // Hide the timer widget
+            Task { @MainActor in
+                await notchManager.hideProtectionTimer()
+            }
+
+            // Stop timer update loop
+            timerWrapper.timer?.invalidate()
+            timerWrapper.timer = nil
         }
 
         // Setup PASTE detector (Cmd+V)
@@ -133,20 +264,55 @@ struct ClipboardApp: App {
         }
         #endif
 
-        // Setup clipboard monitoring callbacks
-        clipboardMonitor.onCryptoCopied = { [self] address, type in
-            print("📋 COPY: \(type.rawValue) address copied")
+        // Setup clipboard monitoring callbacks - NEW OPT-IN FLOW
+        clipboardMonitor.onCryptoDetected = { [self] address, type in
+            print("📋 CRYPTO DETECTED: \(type.rawValue) address")
+            print("   🔒 Hash captured immediately")
 
-            // Start 2-minute protection for this address
-            clipboardMonitor.startProtection(for: address, type: type)
-
-            // Show blue protection indicator (cursor position)
+            // Show confirmation widget in notch
             #if os(macOS)
             DispatchQueue.main.async {
+                // Show blue copy indicator at cursor
                 floatingIndicator.showCopy(for: type)
 
-                // Show persistent protection timer in top-right corner
+                // Show confirmation widget (asks user to enable protection)
+                self.showConfirmationWidget(address: address, type: type)
+            }
+            #endif
+        }
+
+        clipboardMonitor.onProtectionConfirmed = { [self] type, address in
+            print("🛡️ PROTECTION CONFIRMED by user")
+
+            // Show protection timer widget
+            #if os(macOS)
+            DispatchQueue.main.async {
                 self.showProtectionTimer(for: type)
+            }
+            #endif
+        }
+
+        clipboardMonitor.onMalwareDetectedDuringConfirmation = { [self] original, hijacked in
+            print("🚨 MALWARE DETECTED DURING CONFIRMATION!")
+
+            // Show critical alert
+            #if os(macOS)
+            DispatchQueue.main.async {
+                self.blockedPasteAlert.showHijackDuringConfirmation(
+                    original: original,
+                    hijacked: hijacked
+                )
+            }
+            #endif
+        }
+
+        clipboardMonitor.onClipboardLockWarning = { [self] message in
+            print("🔒 [CLIPBOARD LOCKED] \(message)")
+
+            // Show warning in notch
+            #if os(macOS)
+            Task { @MainActor in
+                await self.notchManager.showWarning("⚠️ Clipboard is locked during protection")
             }
             #endif
         }
@@ -162,91 +328,107 @@ struct ClipboardApp: App {
             #endif
         }
 
+        // Hijack detected during protection (when paste is attempted)
         clipboardMonitor.onHijackDetected = { original, attempted in
-            print("🚨 Hijack detected!")
-            // DISABLED: System notifications are too intrusive
-            // User will see red alert when trying to paste instead
-            // NotificationManager.shared.sendHijackAlert(
-            //     originalAddress: original,
-            //     attemptedAddress: attempted
-            // )
-        }
-
-        clipboardMonitor.onNonCryptoContentCopied = { [self] in
-            print("⚠️  Non-crypto content copied - showing warning and auto-hiding in 5s")
-            #if os(macOS)
-            DispatchQueue.main.async {
-                // Stop the protection timer update loop
-                self.timerWrapper.timer?.invalidate()
-                self.timerWrapper.timer = nil
-
-                // Show warning for 5 seconds
-                self.protectionTimer.showWarning("Non-crypto content copied - Protection stopped")
-
-                // Auto-hide widget after 5 seconds
-                DispatchQueue.main.asyncAfter(deadline: .now() + 5.0) {
-                    print("⏱️  Auto-hiding protection timer after 5s")
-                    self.hideProtectionTimer()
-                }
-            }
-            #endif
+            print("🚨 Hijack detected on paste attempt!")
+            // Paste blocker will show red alert at cursor
         }
 
         // Auto-start monitoring if licensed
+        print("🔍 [Setup] Checking license status...")
+        print("   Licensed: \(licenseManager.isLicensed)")
+
         if licenseManager.isLicensed {
+            print("✅ [Setup] License valid - starting clipboard monitoring")
             clipboardMonitor.startMonitoring()
+        } else {
+            print("❌ [Setup] No valid license - monitoring NOT started")
         }
     }
 
-    // MARK: - Protection Timer Management
+    // MARK: - Protection Flow Management
 
     #if os(macOS)
+    private func showConfirmationWidget(address: String, type: CryptoType) {
+        print("🔐 [Confirmation] Showing opt-in widget for \(type.rawValue)")
+
+        // Show confirmation widget in notch
+        Task { @MainActor in
+            await notchManager.showConfirmation(
+                address: address,
+                type: type,
+                onConfirm: { [weak clipboardMonitor, weak notchManager] in
+                    print("✅ [Confirmation] User clicked 'Enable Protection'")
+
+                    // Hide confirmation widget immediately
+                    Task { @MainActor in
+                        await notchManager?.hideConfirmation()
+
+                        // Small delay for smooth transition (just animation time)
+                        try? await Task.sleep(for: .milliseconds(100))
+
+                        // Confirm protection (this triggers onProtectionConfirmed which shows timer)
+                        clipboardMonitor?.confirmProtection()
+                    }
+                },
+                onDismiss: { [weak clipboardMonitor] in
+                    print("❌ [Confirmation] User dismissed")
+                    clipboardMonitor?.dismissPendingProtection()
+                }
+            )
+        }
+    }
+
     private func showProtectionTimer(for type: CryptoType) {
         print("🎯 [ProtectionTimer] Showing notch widget for \(type.rawValue)")
         print("   Time remaining: \(clipboardMonitor.protectionTimeRemaining)s")
 
-        // Show the timer window
-        protectionTimer.showProtection(
-            for: type,
-            timeRemaining: clipboardMonitor.protectionTimeRemaining,
-            onDismiss: { [weak timerWrapper, weak clipboardMonitor] in
-                print("❌ [ProtectionTimer] User dismissed via × button")
-                timerWrapper?.timer?.invalidate()
-                timerWrapper?.timer = nil
-                clipboardMonitor?.stopProtection()
-            }
-        )
+        // Stop any existing timer update loop
+        timerWrapper.timer?.invalidate()
+        timerWrapper.timer = nil
+
+        // Show the timer in the notch
+        Task { @MainActor in
+            await notchManager.showProtectionTimer(
+                for: type,
+                timeRemaining: clipboardMonitor.protectionTimeRemaining,
+                onDismiss: { [weak timerWrapper, weak clipboardMonitor] in
+                    print("❌ [ProtectionTimer] User dismissed via × button")
+                    timerWrapper?.timer?.invalidate()
+                    timerWrapper?.timer = nil
+                    clipboardMonitor?.stopProtection()
+                }
+            )
+        }
 
         // Start updating the timer every 0.1 seconds for smooth countdown
         print("🔄 [ProtectionTimer] Starting update loop (every 0.1s)")
-        timerWrapper.timer?.invalidate()
 
         var lastLoggedSecond = -1
-        timerWrapper.timer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak timerWrapper, weak clipboardMonitor] _ in
-            // Update timer display
-            guard let monitor = clipboardMonitor else {
-                print("⚠️  [ProtectionTimer] Monitor is nil")
-                return
-            }
+        timerWrapper.timer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak timerWrapper, weak clipboardMonitor, weak notchManager] _ in
+            guard let monitor = clipboardMonitor else { return }
             let timeRemaining = monitor.protectionTimeRemaining
 
             // Log every second to avoid spam
             let currentSecond = Int(timeRemaining)
             if currentSecond != lastLoggedSecond {
                 print("🔄 [ProtectionTimer] Updating: \(currentSecond)s, active: \(monitor.protectionActive)")
-                print("   Calling updateTime on protectionTimer...")
                 lastLoggedSecond = currentSecond
             }
 
             if timeRemaining > 0 && monitor.protectionActive {
-                // Use self here - don't capture weakly!
-                self.protectionTimer.updateTime(timeRemaining)
+                // Update the view model time
+                DispatchQueue.main.async {
+                    notchManager?.updateTimer(timeRemaining)
+                }
             } else {
                 // Protection expired or stopped
                 print("⏹️  [ProtectionTimer] Stopping (time: \(timeRemaining)s, active: \(monitor.protectionActive))")
                 timerWrapper?.timer?.invalidate()
                 timerWrapper?.timer = nil
-                self.protectionTimer.hideProtection()
+                Task { @MainActor in
+                    await notchManager?.hideProtectionTimer()
+                }
             }
         }
     }
@@ -254,7 +436,9 @@ struct ClipboardApp: App {
     private func hideProtectionTimer() {
         timerWrapper.timer?.invalidate()
         timerWrapper.timer = nil
-        protectionTimer.hideProtection()
+        Task { @MainActor in
+            await notchManager.hideProtectionTimer()
+        }
     }
     #endif
 }

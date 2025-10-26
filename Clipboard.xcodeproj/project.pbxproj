@@ -6,6 +6,10 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		94DNK0012EA3AD1600F2B236 /* DynamicNotchKit in Frameworks */ = {isa = PBXBuildFile; productRef = 94DNK0002EA3AD1600F2B236 /* DynamicNotchKit */; };
+/* End PBXBuildFile section */
+
 /* Begin PBXFileReference section */
 		94B4A62F2EA3AD1600F2B236 /* Clipboard.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Clipboard.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
@@ -23,6 +27,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				94DNK0012EA3AD1600F2B236 /* DynamicNotchKit in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -65,6 +70,7 @@
 			);
 			name = Clipboard;
 			packageProductDependencies = (
+				94DNK0002EA3AD1600F2B236 /* DynamicNotchKit */,
 			);
 			productName = Clipboard;
 			productReference = 94B4A62F2EA3AD1600F2B236 /* Clipboard.app */;
@@ -94,6 +100,9 @@
 			);
 			mainGroup = 94B4A6262EA3AD1600F2B236;
 			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				94DNK0032EA3AD1600F2B236 /* XCRemoteSwiftPackageReference "DynamicNotchKit" */,
+			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 94B4A6302EA3AD1600F2B236 /* Products */;
 			projectDirPath = "";
@@ -351,6 +360,25 @@
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		94DNK0032EA3AD1600F2B236 /* XCRemoteSwiftPackageReference "DynamicNotchKit" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/MrKai77/DynamicNotchKit";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 1.0.0;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		94DNK0002EA3AD1600F2B236 /* DynamicNotchKit */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 94DNK0032EA3AD1600F2B236 /* XCRemoteSwiftPackageReference "DynamicNotchKit" */;
+			productName = DynamicNotchKit;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = 94B4A6272EA3AD1600F2B236 /* Project object */;
 }

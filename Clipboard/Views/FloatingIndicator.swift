@@ -222,6 +222,11 @@ struct PasteIndicator: View {
 /// Floating indicator window for macOS
 #if os(macOS)
 class FloatingIndicatorWindow: NSWindow {
+
+    // Override to prevent window from becoming key (prevents focus and desktop switching)
+    override var canBecomeKey: Bool { false }
+    override var canBecomeMain: Bool { false }
+
     init() {
         super.init(
             contentRect: NSRect(x: 0, y: 0, width: 200, height: 60),
@@ -238,6 +243,10 @@ class FloatingIndicatorWindow: NSWindow {
         isReleasedWhenClosed = false
         collectionBehavior = [.canJoinAllSpaces, .stationary]
         alphaValue = 1.0  // Ensure fully visible
+
+        // Prevent this window from activating the app
+        hidesOnDeactivate = false
+        styleMask.insert(.nonactivatingPanel)
     }
 
     /// Shows copy indicator near mouse cursor
@@ -254,13 +263,16 @@ class FloatingIndicatorWindow: NSWindow {
         ))
 
         // Set content
-        contentView = NSHostingView(
-            rootView: CopyIndicator(cryptoType: cryptoType)
-        )
+        let hosting = NSHostingView(rootView: CopyIndicator(cryptoType: cryptoType))
+        hosting.wantsLayer = true
+        hosting.layer?.backgroundColor = .clear
+        hosting.layer?.isOpaque = false
+        contentView = hosting
+        contentView?.wantsLayer = true
+        contentView?.layer?.backgroundColor = .clear
 
-        // Make window visible
+        // Make window visible - use only orderFrontRegardless() to avoid activating the app
         alphaValue = 1.0
-        makeKeyAndOrderFront(nil)
         orderFrontRegardless()
 
         print("   [FloatingIndicator] Window shown at (\(frame.origin.x), \(frame.origin.y))")
@@ -285,13 +297,16 @@ class FloatingIndicatorWindow: NSWindow {
         ))
 
         // Set content
-        contentView = NSHostingView(
-            rootView: PasteIndicator(cryptoType: cryptoType)
-        )
+        let hosting = NSHostingView(rootView: PasteIndicator(cryptoType: cryptoType))
+        hosting.wantsLayer = true
+        hosting.layer?.backgroundColor = .clear
+        hosting.layer?.isOpaque = false
+        contentView = hosting
+        contentView?.wantsLayer = true
+        contentView?.layer?.backgroundColor = .clear
 
-        // Make window visible
+        // Make window visible - use only orderFrontRegardless() to avoid activating the app
         alphaValue = 1.0
-        makeKeyAndOrderFront(nil)
         orderFrontRegardless()
 
         print("   [FloatingIndicator] Window shown at (\(frame.origin.x), \(frame.origin.y))")
